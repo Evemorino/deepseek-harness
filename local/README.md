@@ -110,19 +110,94 @@ dsh-desktop --isolated      # 用 dev 隔离 home，不碰 ~/.dsh
 
 🔴 **`dsh desktop` 是不可用的** —— CLI 会直接报
 `error: profile "desktop" is managed exclusively by the Electron application`。
-这是硬编码的（`apps/cli/src/args.ts` 的 `rejectElectronProfile()`），
-桌面端只能由 Electron 壳启动。所以才需要这个启动器。
+
+这是 `apps/cli/src/args.ts:83-87` 里一个**字面量的名字黑名单**：
+
+```ts
+function rejectElectronProfile(program: Command, profile: string): void {
+  if (profile.toLowerCase() === 'desktop') {
+    program.error('error: profile "desktop" is managed exclusively by the Electron application')
+  }
+}
+```
+
+它在 `:183`（任何 profile boot，连 `--dump-config` 都拦）和 `:195`
+（`plugin` 子命令，**除非** `manageDesktopProfile` 为真）被调用。实测三种写法全被拒：
+
+```
+$ dsh desktop                              → 拒绝
+$ dsh --dump-config --profile desktop      → 拒绝
+$ dsh plugin --profile desktop list        → 拒绝
+```
+
+**为什么要封它** —— 三个层次的理由：
+
+1. **desktop profile 只是「一份插件组合」，不是「一个应用」**。
+   `~/.dsh/profiles/desktop/package.json` 里的 bundles 是
+   `['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']` —— 和 `web` profile 几乎一样。
+   光 boot 它，你得到的是一个 **web 服务**，不是桌面窗口。
+
+2. **真正的桌面应用 = Electron 主进程 + Desktop Host + BrowserWindow + Node IPC 桥**。
+   `apps/desktop-host/src/index.ts:22-31` 显示 Host 是**绕开 `parseDshArgs`**、
+   直接调 `runProfile()` 的：
+
+   ```ts
+   const application = runProfile({
+     environment: loadLayeredEnv('dsh'),
+     profile: 'desktop',
+     resolvedProfile: { profile, installAnchor },
+     patchFiles: [],
+     args: ['--no-open', '--port', '19387'],
+   })
+   ```
+
+   它注入了 `resolvedProfile` 和 `installAnchor`（签名资源里那份 bundled runtime）
+   以及 Desktop 自带的 pnpm —— **这些都不是 CLI argv 能表达的东西**。
+
+3. **boot injections**：`apps/desktop/README.md` 的 Transport 表写明
+   「Electron loads packaged Web assets; the Host supplies boot injections and
+   authenticated APIs」。普通 CLI boot 没有 Electron 的 `process.send` IPC 通道，
+   客户端插件等不到 injection，激活会失败。
+
+**所以「改成 `dsh desktop`」技术上要改上游源码**（`apps/cli/src/args.ts`），
+而这属于动公共逻辑、要落 `personal` 分支、每次上游同步都可能冲突 —— 不划算。
+`dsh-desktop.sh` 就是那个**对齐 Electron 壳行为的 wrapper**：起 Electron、
+给对 `DSH_HOME`、兜底 Electron 镜像与 pnpm。这才是正确的做法。
+
+> 📌 一个有意思的旁证：那道闸门**只**是 `manageDesktopProfile` 这个布尔量。
+> 用仓库里的 `apps/desktop-host/lib/cli.js`（它传 `manageDesktopProfile: true`）
+> 跑 `plugin --profile desktop list`，**没有被拒绝** —— 一路走到真的去执行 pnpm
+> 才失败（dev 布局下 runtimeDir 解析不对，报
+> `Cannot find module '/Users/nava/Code/runtime/pnpm/bin/pnpm.mjs'`）。
+> 说明拒绝**不是**能力缺失，是刻意的准入控制。
 
 **默认共享产品 home（`~/.dsh`）** —— 这样插件、凭证、会话都和打包版一致，
 才能真正当日常驱动用（依据 `apps/desktop/scripts/dev.ts`：
 `const home = resolve(process.env.DSH_HOME ?? join(DEVELOPMENT_ROOT, 'home'))`）。
 加 `--isolated` 回到 dev 原生隔离。
 
-⚠️ **顺序陷阱**：如果你想先跑 `dsh plugin --profile desktop add ...` 再启动桌面端 —— 别这样。
-`PROFILE_TEMPLATES` 里没有 `desktop` 这个模板，CLI 会回退到
-`DEFAULT_PROFILE_BUNDLES = ['@deepseek-ai/dsh-base']`，把 profile 建成「只有 base、
-没有 `dsh-web-app`」；而 `initProfile` 的规则是「已存在的文件永不触碰」，桌面端后来也不会补上
-→ 桌面 UI 起不来。**先启动一次桌面端**再装插件。
+⚠️ **管 desktop profile 的插件，不能用 PATH 上的 `dsh`**
+
+`dsh plugin --profile desktop ...` 会在**参数解析阶段**就被拒掉
+（`apps/cli/src/args.ts:195` 的 `rejectElectronProfile()`）—— 和 `dsh desktop` 是同一道闸门。
+所以 PATH 上的 `dsh` **永远**管不了 desktop profile，先启动桌面端也没用。
+
+能管的是**桌面端自带的那份 CLI**：打包后位于
+`<Desktop.app>/Contents/Resources/runtime/cli/bin/dsh`
+（依据 `apps/desktop/README.md` 的「Bundled command runtime」节；
+它由 `apps/desktop-host/src/cli.ts:16` 传入 `manageDesktopProfile: true` 解锁，
+并用 Desktop 自带的 pnpm）。
+
+**而用那份 CLI 时，顺序就重要了**：先启动一次桌面端初始化
+`~/.dsh/profiles/desktop/`，完全退出，再装插件。因为：
+
+- `apps/cli/src/plugin.ts:11-15` 的 `requireDesktopProfile()` 会拒绝**未初始化**的
+  desktop profile；`:44` 对 desktop 特意**不**执行 `mkdir`。
+- `PROFILE_TEMPLATES`（`packages/boot/app-boot/src/profile.ts:179-195`）里**没有** `desktop`
+  模板（只有 acp / web / headless / sdk / sdk-minimal）。一旦走到 `initProfile`，
+  就会回退成 `DEFAULT_PROFILE_BUNDLES = ['@deepseek-ai/dsh-base']` —— 只有 base、
+  没有 `dsh-web-app`，桌面 UI 起不来。
+- 且 `initProfile` 的规则是「已存在的文件永不触碰」，桌面端后来**也不会**补上。
 
 #### 这个启动器替你处理的两件事
 
