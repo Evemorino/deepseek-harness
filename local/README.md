@@ -199,7 +199,7 @@ $ dsh plugin --profile desktop list        → 拒绝
   没有 `dsh-web-app`，桌面 UI 起不来。
 - 且 `initProfile` 的规则是「已存在的文件永不触碰」，桌面端后来**也不会**补上。
 
-#### 这个启动器替你处理的两件事
+#### 这个启动器替你处理的三件事
 
 **① Electron 二进制走国内镜像 + 强制启用代理**
 
@@ -224,11 +224,51 @@ export ELECTRON_GET_USE_PROXY
 WorkBuddy / 非登录 shell 里 mise shims 常常没加载，`pnpm` 不在 PATH。
 脚本会回退到 `/opt/homebrew/bin/mise -C "$REPO" exec -- pnpm ...`。
 
+**③ 摘掉 `ELECTRON_RUN_AS_NODE`**（2026-10-01 加，实测踩到）
+
+WorkBuddy 的工具 shell 会设 `ELECTRON_RUN_AS_NODE=1`（它自己就是 Electron 应用，
+用它跑 Node 侧车）。这个变量会让 Electron 二进制**退化成 Node**，于是 `dev.ts`
+传过去的 Chromium 开关被当成 Node 的非法选项：
+
+```
+Harness Dev.app/Contents/MacOS/Electron: bad option: --remote-debugging-port=9222
+Harness Dev.app/Contents/MacOS/Electron: bad option: --user-data-dir=...
+desktop development:  exited with 9
+```
+
+成因是 `dev.ts` 的 `environment` 写成 `{ ...process.env, ... }`，原样继承父进程环境。
+
+**判据（同一二进制跑 `--version`）**：有该变量 → `v24.18.1`（Node）；
+摘掉 → `v44.0.0`（Electron）。所以脚本在入口 `unset ELECTRON_RUN_AS_NODE`。
+在你自己终端里没人设它，这是无副作用的防御。
+
 其他：Electron 浏览器数据始终隔离在
 `apps/desktop/.desktop-build/development/electron-user-data`；
 首次启动要下载 primary runtime（node + pnpm + python + office），比较慢；
 默认开 DevTools（`DSH_DESKTOP_OPEN_DEVTOOLS=0` 关）；
 调试端口 Main 9229 / Renderer 9222 / Host 9230。
+
+#### ⚠️ 在 WorkBuddy 会话里跑 `dsh-desktop` 的两个额外坑
+
+这两条都**只在 WorkBuddy 工具调用里**成立（护栏与环境变量都由 WorkBuddy 注入，
+源码依据见 skill `workbuddy-heavy-install`）。你自己终端里跑没有这些约束。
+
+1. **必须前台跑。** `dev.ts` 每次都会清空并重建
+   `apps/desktop/.desktop-build/development/project` —— 里面有 **1498 个软链** +
+   3 个文件（workspace 投影），远超 safe-delete 护栏的 50 阈值。
+   后台任务弹不出审批框，必然失败：
+
+   ```
+   [safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":1501,"threshold":50,
+     "scope":"turn","targets":[".../development/project"],"targetCount":1}
+   ```
+
+2. **shim 在 Electron 内部也生效。** `NODE_OPTIONS` 挂着
+   `node-language-shim.cjs`，且 `CODEBUDDY_SESSION_ID` 已设置 → fs broker 与
+   safe-delete 护栏对 Electron 主进程 / Desktop Host **同样有效**。
+   本次实测没造成故障（窗口建起来了、`cordis.patch.yml` 也写成功），
+   但如果将来遇到「桌面端某个写操作莫名失败」，先怀疑这里。
+   ⚠️ **不要**用环境变量去关护栏 —— 那是替用户拍板，不是解法。
 
 📌 **构建成功 ≠ 桌面出现 app**：`dsh-desktop` 是**开发态**，产物是临时 app
 `apps/desktop/.desktop-build/development/Harness Dev.app`，**不会**进 `/Applications`。

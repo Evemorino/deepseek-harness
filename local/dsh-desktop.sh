@@ -88,6 +88,20 @@ if [ ! -f "$REPO/apps/desktop/package.json" ]; then
   exit 1
 fi
 
+# ⚠️ 必须摘掉 ELECTRON_RUN_AS_NODE，否则 Electron 二进制会退化成 Node。
+#
+# WorkBuddy 的工具 shell 会设这个变量（它自己就是 Electron 应用，用它跑 Node 侧车）。
+# 后果：dev.ts 传给 Electron 的 Chromium 开关被 Node 当成非法选项 ——
+#     Harness Dev.app/Contents/MacOS/Electron: bad option: --remote-debugging-port=9222
+#     desktop development:  exited with 9
+# 成因：dev.ts 的 environment 是 { ...process.env, ... }，原样继承父进程环境。
+#
+# 判据（2026-10-01 实测）：同一个二进制跑 `--version` ——
+#     有该变量 → v24.18.1（Node）    摘掉后 → v44.0.0（Electron）
+#
+# 在你自己终端里不会有这个问题（没人设它）；这里摘掉是无副作用的防御。
+unset ELECTRON_RUN_AS_NODE
+
 # Electron 二进制优先走国内镜像（见文件头说明）。
 # 必须在这里 export：dev.ts 的 require('electron') 会触发安装检查。
 : "${ELECTRON_MIRROR:=https://npmmirror.com/mirrors/electron/}"
@@ -102,10 +116,10 @@ if [ "$ISOLATED" -eq 0 ]; then
   export DSH_HOME
   printf 'dsh-desktop: DSH_HOME=%s（与打包版共享 profile）\n' "$DSH_HOME"
   if [ ! -f "$DSH_HOME/profiles/desktop/package.json" ]; then
-    printf 'dsh-desktop: 提示 —— desktop profile 尚未初始化。\n'
-    printf '             桌面端首次启动会自动创建；但如果你打算先跑\n'
-    printf '             `dsh plugin --profile desktop add ...`，务必先启动一次桌面端，\n'
-    printf '             否则 profile 会被建成「只有 base、没有 web-app」，桌面 UI 起不来。\n'
+    printf 'dsh-desktop: 提示 —— desktop profile 尚未初始化，本次启动会自动创建。\n'
+    printf '             注意 PATH 上的 `dsh` 永远管不了 desktop profile（CLI 硬编码拒绝\n'
+    printf '             该 profile 名）；装桌面端插件要用桌面端自带的 CLI，\n'
+    printf '             且必须等本 profile 初始化之后（见 local/README.md）。\n'
   fi
 else
   printf 'dsh-desktop: 使用 dev 隔离 home（不碰 ~/.dsh）\n'
