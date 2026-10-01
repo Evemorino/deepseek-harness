@@ -9,8 +9,8 @@
 #   dsh --profile headless ...   显式指定 profile
 #   dsh --version
 #
-# 安装（本文件通过软链暴露到 PATH）：
-#   ln -sf "$PWD/scripts/dsh.sh" ~/.local/bin/dsh
+# 安装（本文件通过软链暴露到 PATH，在仓库根目录执行）：
+#   ln -sf "$PWD/local/dsh.sh" ~/.local/bin/dsh
 #
 # 两条必须知道的性质
 # ------------------

@@ -49,6 +49,20 @@ ln -sf "$PWD/local/dsh-sync.sh"    ~/.local/bin/dsh-sync
 
 `~/.local/bin` 需在 PATH 中 —— 本机由 `~/.path.zsh` 提供。
 
+⚠️ **`local/` 只存在于 `personal` 分支**，所以软链是「跟着分支走」的：
+仓库停在 `master`（或任何非 `personal` 分支）时，三个命令都会直接报
+`no such file or directory` —— 因为软链目标文件此刻不存在。
+
+正常流程不会踩到：`dsh-sync` 结束时会把仓库切回你原来的分支
+（`dsh-sync.sh:336-338` 的 `git checkout "$orig_branch"`）。
+**只有手动 `git checkout master` 且忘记切回来时**才会遇到。届时：
+
+```sh
+cd ~/Code/github/deepseek-harness && git checkout personal
+```
+
+（不要把 `local/` 也提交到 `master` —— 那会污染「上游纯镜像」这条分支的根本约定。）
+
 ## 个性化该放哪（优先顺序）
 
 一共四层，**优先用靠前的**：

@@ -42,8 +42,8 @@
 # 环境变量
 #   DSH_REPO   指定 harness 检出的路径（默认见下）
 #
-# 安装（本文件通过软链暴露到 PATH）：
-#   ln -sf "$PWD/scripts/dsh-desktop.sh" ~/.local/bin/dsh-desktop
+# 安装（本文件通过软链暴露到 PATH，在仓库根目录执行）：
+#   ln -sf "$PWD/local/dsh-desktop.sh" ~/.local/bin/dsh-desktop
 
 set -eu
 
